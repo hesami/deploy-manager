@@ -30,6 +30,17 @@ from core.status import get_app_status
 from core.manager import get_logs, restart_container, rebuild_project, rollback_project, create_project_backup, restore_project_backup, wait_container_ready, cleanup_images, get_running_container_image, write_image_override
 from core.pipeline import run_pipeline
 
+from core.ui import (
+    clear_screen,
+    pause,
+    header,
+    menu_item,
+    line,
+    section,
+    value,
+    UI
+)
+
 
 from core.system_reader import (
     get_os_info,
@@ -161,9 +172,33 @@ def inspect(application):
 
 def server_info():
 
-    print(get_os_info())
-    print(get_docker_version())
-    print(get_compose_version())
+    clear_screen()
+
+    header("Server Information")
+
+
+    section("Operating System")
+
+    value(
+        "System",
+        get_os_info()
+    )
+
+
+    section("Docker")
+
+    value(
+        "Version",
+        get_docker_version()
+    )
+
+
+    section("Docker Compose")
+
+    value(
+        "Version",
+        get_compose_version()
+    )
 
 
 
@@ -1051,6 +1086,370 @@ Deployment History
     conn.close()
 
 
+
+
+def application_menu():
+
+    while True:
+
+        clear_screen()
+
+        print("""
+=================================
+ Application Management
+=================================
+
+1) List Applications
+2) Deploy Application
+3) Application Versions
+4) Deployment History
+0) Back
+
+=================================
+""")
+
+        choice = input("Select: ")
+
+
+        if choice == "1":
+
+            clear_screen()
+
+            clear_screen()
+
+            list_apps()
+
+            pause()
+
+
+        elif choice == "2":
+
+            name = input(
+                "Application name: "
+            )
+
+            clear_screen()
+
+            app_deploy(name)
+
+            pause()
+
+
+        elif choice == "3":
+
+            name = input(
+                "Application name: "
+            )
+
+            clear_screen()
+
+            app_versions(name)
+
+            pause()
+
+
+        elif choice == "4":
+
+            name = input(
+                "Application name: "
+            )
+
+            clear_screen()
+
+            app_history(name)
+
+            pause()
+
+
+        elif choice == "0":
+
+            break
+
+
+        else:
+
+            print("Invalid option")
+
+
+
+
+def system_menu():
+
+    while True:
+
+        clear_screen()
+
+        print("""
+=================================
+ System Information
+=================================
+
+1) Server Information
+2) Docker Information
+0) Back
+
+=================================
+""")
+
+        choice = input("Select: ")
+
+
+        if choice == "1":
+
+            clear_screen()
+
+            server_info()
+
+            pause()
+
+
+        elif choice == "2":
+
+            clear_screen()
+
+            docker_info()
+
+            pause()
+
+
+        elif choice == "0":
+
+            break
+
+
+        else:
+
+            print("Invalid option")
+
+
+
+
+
+def clear_screen():
+
+    import os
+    os.system("clear")
+
+
+def pause():
+
+    input("\nPress Enter to continue...")
+
+
+
+def application_menu():
+
+    while True:
+
+        clear_screen()
+
+        header("Applications")
+
+        menu_item(
+            "1",
+            "List Applications",
+            "View registered applications"
+        )
+
+        menu_item(
+            "2",
+            "Deploy Application",
+            "Run deployment pipeline"
+        )
+
+        menu_item(
+            "3",
+            "Application Versions",
+            "View image versions"
+        )
+
+        menu_item(
+            "4",
+            "Deployment History",
+            "View deployment records"
+        )
+
+        menu_item(
+            "0",
+            "Back"
+        )
+
+        line()
+
+        choice = input(
+            "Select option: "
+        )
+
+
+        if choice == "1":
+
+            clear_screen()
+            list_apps()
+            pause()
+
+
+        elif choice == "2":
+
+            name = input(
+                "Application name: "
+            )
+
+            clear_screen()
+            app_deploy(name)
+            pause()
+
+
+        elif choice == "3":
+
+            name = input(
+                "Application name: "
+            )
+
+            clear_screen()
+            app_versions(name)
+            pause()
+
+
+        elif choice == "4":
+
+            name = input(
+                "Application name: "
+            )
+
+            clear_screen()
+            app_history(name)
+            pause()
+
+
+        elif choice == "0":
+
+            break
+
+
+
+
+def system_menu():
+
+    while True:
+
+        clear_screen()
+
+        header("System Information")
+
+        menu_item(
+            "1",
+            "Server Information"
+        )
+
+        menu_item(
+            "2",
+            "Docker Information"
+        )
+
+        menu_item(
+            "0",
+            "Back"
+        )
+
+        line()
+
+        choice = input(
+            "Select option: "
+        )
+
+
+        if choice == "1":
+
+            clear_screen()
+            server_info()
+            pause()
+
+
+        elif choice == "2":
+
+            clear_screen()
+            docker_info()
+            pause()
+
+
+        elif choice == "0":
+
+            break
+
+
+
+
+def menu():
+
+    while True:
+
+        clear_screen()
+
+        header("Deploy Manager")
+
+        menu_item(
+            "1",
+            "Applications",
+            "Application lifecycle management"
+        )
+
+        menu_item(
+            "2",
+            "System",
+            "Server and Docker information"
+        )
+
+        menu_item(
+            "3",
+            "Import Applications"
+        )
+
+        menu_item(
+            "4",
+            "Registry Status"
+        )
+
+        menu_item(
+            "0",
+            "Exit"
+        )
+
+        line()
+
+        choice = input(
+            "Select option: "
+        )
+
+
+        if choice == "1":
+
+            application_menu()
+
+
+        elif choice == "2":
+
+            system_menu()
+
+
+        elif choice == "3":
+
+            clear_screen()
+            do_import()
+            pause()
+
+
+        elif choice == "4":
+
+            clear_screen()
+            registry_status()
+            pause()
+
+
+        elif choice == "0":
+
+            break
+
+
 def main():
 
 
@@ -1069,6 +1468,7 @@ Commands:
  inspect-app <name>
  import
  list
+ menu
 """)
 
         return
@@ -1088,6 +1488,9 @@ Commands:
 
     elif command == "registry-status":
         registry_status()
+
+    elif command == "menu":
+        menu()
 
     elif command == "import":
         do_import()
@@ -1297,4 +1700,11 @@ Commands:
 
 
 if __name__ == "__main__":
-    main()
+
+    try:
+        main()
+
+    except KeyboardInterrupt:
+
+        print("\n\nExiting Deploy Manager...")
+
