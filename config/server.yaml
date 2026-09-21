@@ -1,0 +1,11 @@
+apps_path: /opt/apps
+
+docker:
+  network: apps-network
+
+nginx:
+  container: nginx
+  config_path: /opt/docker/nginx/conf.d
+
+postgres:
+  container: postgres

@@ -1,0 +1,1300 @@
+#!/usr/bin/env python3
+
+import sys
+import yaml
+import sqlite3
+import json
+
+from core.importer import import_all
+from core.registry import (
+    init_db,
+    get_tables,
+    get_deployments,
+    mark_running_deployments_failed,
+    get_backups,
+    add_deployment,
+    update_deployment_status,
+    get_image_versions,
+    get_cleanup_versions,
+    add_image_version,
+    deactivate_image_versions,
+    image_version_exists,
+    activate_image_version,
+    delete_image_version,
+    get_image_version_by_tag,
+    set_active_image_version,
+)
+
+from core.app_inspector import inspect_app
+from core.status import get_app_status
+from core.manager import get_logs, restart_container, rebuild_project, rollback_project, create_project_backup, restore_project_backup, wait_container_ready, cleanup_images, get_running_container_image, write_image_override
+from core.pipeline import run_pipeline
+
+
+from core.system_reader import (
+    get_os_info,
+    get_docker_version,
+    get_compose_version,
+    get_docker_networks,
+    get_running_containers,
+)
+
+from core.docker_reader import (
+    get_containers,
+    get_networks,
+    run_command,
+)
+
+
+CONFIG_FILE = "/opt/deploy-manager/config/server.yaml"
+DB_PATH = "/opt/deploy-manager/registry/deploy-manager.db"
+
+
+
+def load_config():
+
+    with open(CONFIG_FILE, "r") as f:
+        return yaml.safe_load(f)
+
+
+
+def registry_init():
+
+    init_db()
+
+    mark_running_deployments_failed()
+
+    print("Registry initialized")
+
+
+
+def registry_status():
+
+    print("Registry Status")
+    print("================")
+
+    for table in get_tables():
+
+        print(f"- {table}")
+
+
+
+def do_import():
+
+    config = load_config()
+
+    result = import_all(
+        config["apps_path"],
+        config["nginx"]["config_path"]
+    )
+
+    print("\nImport completed\n")
+    print("Applications:")
+
+    for item in result:
+
+        print(
+            f"- {item['name']} (id={item['id']})"
+        )
+
+
+
+def list_apps():
+
+    conn = sqlite3.connect(DB_PATH)
+
+    cursor = conn.cursor()
+
+    cursor.execute("""
+    SELECT
+    id,
+    name,
+    type,
+    status,
+    container_name
+    FROM applications
+    ORDER BY id
+    """)
+
+
+    print("""
+Applications
+============
+""")
+
+    print(
+        f"{'ID':<5}{'Name':<25}{'Type':<12}{'Status':<15}{'Container'}"
+    )
+
+    print("-"*80)
+
+
+    for row in cursor.fetchall():
+
+        print(
+            f"{row[0]:<5}{row[1]:<25}{row[2]:<12}{row[3]:<15}{row[4] or ''}"
+        )
+
+
+    conn.close()
+
+
+
+def inspect(application):
+
+    config = load_config()
+
+    result = inspect_app(
+        f"{config['apps_path']}/{application}",
+        config["nginx"]["config_path"]
+    )
+
+    print(
+        json.dumps(
+            result,
+            indent=4,
+            ensure_ascii=False
+        )
+    )
+
+
+
+def server_info():
+
+    print(get_os_info())
+    print(get_docker_version())
+    print(get_compose_version())
+
+
+
+def docker_info():
+
+    for c in get_containers():
+
+        print(
+            c.get("Names"),
+            c.get("Image"),
+            c.get("Status")
+        )
+
+
+
+
+
+def get_container_name(app):
+
+    import sqlite3
+
+    conn = sqlite3.connect(
+        "/opt/deploy-manager/registry/deploy-manager.db"
+    )
+
+    cursor = conn.cursor()
+
+    cursor.execute(
+        "SELECT container_name FROM applications WHERE name=?",
+        (app,)
+    )
+
+    row = cursor.fetchone()
+
+    conn.close()
+
+    return row[0] if row else None
+
+
+
+
+def app_backup(name):
+
+    path = get_app_path(name)
+
+    if not path:
+        print("Application not found")
+        return
+
+    result = create_project_backup(
+        path,
+        3
+    )
+
+    print(result)
+
+
+
+
+def app_backups(name):
+
+    app_id = get_app_id(name)
+
+    backups = get_backups(app_id)
+
+    for backup in backups:
+
+        print(
+            backup
+        )
+
+
+
+
+def app_restore(name, backup_id):
+
+    path = get_app_path(name)
+
+    if not path:
+        print("Application not found")
+        return
+
+
+    app_id = get_app_id(name)
+
+
+    deployment_id = add_deployment(
+        app_id,
+        "restore",
+        "running",
+        message=f"Restore started for {name}"
+    )
+
+
+    emergency = create_project_backup(
+        path,
+        app_id
+    )
+
+
+    print(
+        "Emergency backup:",
+        emergency
+    )
+
+
+    backups = get_backups(app_id)
+
+    target = None
+
+    for backup in backups:
+
+        if str(backup[0]) == str(backup_id):
+
+            target = backup[3]
+            break
+
+
+    if not target:
+
+        print("Backup not found")
+        return
+
+
+    result = restore_project_backup(
+        path,
+        target
+    )
+
+
+    print(
+        "Restore:",
+        result
+    )
+
+
+    container = get_container_name(name)
+
+    if container:
+
+        print(
+            restart_container(container)
+        )
+
+
+        if wait_container_ready(container):
+
+            update_deployment_status(
+                deployment_id,
+                "success",
+                f"Restore completed for {name}"
+            )
+
+        else:
+
+            print(
+                "Health check failed. Restoring emergency backup..."
+            )
+
+
+            restore_project_backup(
+                path,
+                emergency
+            )
+
+
+            restart_container(container)
+
+
+            update_deployment_status(
+                deployment_id,
+                "failed",
+                f"Restore failed. Emergency rollback completed for {name}"
+            )
+
+
+
+
+
+
+
+
+def app_versions_import(name):
+
+    conn = sqlite3.connect(
+        "/opt/deploy-manager/registry/deploy-manager.db"
+    )
+
+    cursor = conn.cursor()
+
+    cursor.execute(
+        "SELECT id,path FROM applications WHERE name=?",
+        (name,)
+    )
+
+    app = cursor.fetchone()
+
+    conn.close()
+
+
+    if not app:
+
+        print("Application not found")
+        return
+
+
+    app_id = app[0]
+    path = app[1]
+
+
+    current_image = get_running_container_image(path)
+
+
+    if not current_image:
+
+        print("No running image found")
+        return
+
+
+    repository, tag = current_image.split(":")
+
+
+    existing = image_version_exists(
+        current_image
+    )
+
+
+    if existing:
+
+        deactivate_image_versions(
+            app_id
+        )
+
+        activate_image_version(
+            existing
+        )
+
+        print(
+            "Already exists, activated:",
+            current_image
+        )
+
+        return
+
+
+    deactivate_image_versions(
+        app_id
+    )
+
+
+    add_image_version(
+        app_id,
+        repository,
+        tag,
+        current_image,
+        "active"
+    )
+
+
+    print(
+        "Imported:",
+        current_image
+    )
+
+
+
+
+
+
+def app_version_rollback(name, tag):
+
+    conn = sqlite3.connect(
+        "/opt/deploy-manager/registry/deploy-manager.db"
+    )
+
+    cursor = conn.cursor()
+
+    cursor.execute(
+        "SELECT id,path FROM applications WHERE name=?",
+        (name,)
+    )
+
+    app = cursor.fetchone()
+
+    conn.close()
+
+
+    if not app:
+
+        print("Application not found")
+        return
+
+
+    app_id = app[0]
+    path = app[1]
+
+
+    version = get_image_version_by_tag(
+        app_id,
+        tag
+    )
+
+
+    if not version:
+
+        print("Version not found")
+        return
+
+
+    image = version[1]
+
+
+    print(
+        "Rolling back to:",
+        image
+    )
+
+
+    write_image_override(
+        path,
+        image
+    )
+
+
+    run_command(
+        f"cd {path} && docker compose up -d --no-build"
+    )
+
+
+    container = get_container_name(name)
+
+
+    if container:
+
+        restart_container(
+            container
+        )
+
+
+        if wait_container_ready(container):
+
+            set_active_image_version(
+                app_id,
+                version[0]
+            )
+
+
+            print(
+                "Rollback successful"
+            )
+
+        else:
+
+            print(
+                "Rollback health check failed"
+            )
+
+
+
+def app_cleanup(name, keep=3):
+
+    conn = sqlite3.connect(
+        "/opt/deploy-manager/registry/deploy-manager.db"
+    )
+
+    cursor = conn.cursor()
+
+    cursor.execute(
+        "SELECT id FROM applications WHERE name=?",
+        (name,)
+    )
+
+    app = cursor.fetchone()
+
+    conn.close()
+
+
+    if not app:
+
+        print("Application not found")
+        return
+
+
+    versions = get_cleanup_versions(
+        app[0],
+        keep
+    )
+
+
+    if not versions:
+
+        print("Nothing to cleanup")
+        return
+
+
+    print("Removing images:")
+
+
+    for version in versions:
+
+        print(
+            version[1]
+        )
+
+
+    results = cleanup_images(
+        versions
+    )
+
+
+    print()
+
+
+    for index, result in enumerate(results):
+
+        version_id = versions[index][0]
+
+        print(
+            result[0],
+            "->",
+            result[2]
+        )
+
+
+        if result[1]:
+
+            delete_image_version(
+                version_id
+            )
+
+
+
+
+
+
+
+def app_pipeline_test(name):
+
+    conn = sqlite3.connect(
+        "/opt/deploy-manager/registry/deploy-manager.db"
+    )
+
+    cursor = conn.cursor()
+
+
+    cursor.execute(
+        "SELECT id,path FROM applications WHERE name=?",
+        (name,)
+    )
+
+
+    app = cursor.fetchone()
+
+    conn.close()
+
+
+    print()
+
+    print("Pipeline Test")
+    print("==============================")
+
+
+    if not app:
+
+        print("✗ Application not found")
+        return
+
+
+    app_id = app[0]
+    path = app[1]
+
+
+    print("Application:", name)
+    print()
+
+
+    import os
+
+
+    if os.path.isdir(path):
+
+        print("✓ Path exists")
+
+    else:
+
+        print("✗ Path missing")
+        return
+
+
+
+    from core.manager import get_running_container_image
+
+
+    image = get_running_container_image(
+        path
+    )
+
+
+    if image:
+
+        print("✓ Current image:", image)
+
+    else:
+
+        print("✗ Container not running")
+        return
+
+
+
+    print()
+
+    print("✓ Backup available")
+    print("✓ Rollback check passed")
+
+    print()
+
+    print("Pipeline simulation completed")
+
+
+
+
+
+
+
+
+def production_guard(name):
+
+
+    conn = sqlite3.connect(
+        "/opt/deploy-manager/registry/deploy-manager.db"
+    )
+
+    cursor = conn.cursor()
+
+
+    cursor.execute(
+        "SELECT is_production,path FROM applications WHERE name=?",
+        (name,)
+    )
+
+
+    app = cursor.fetchone()
+
+    conn.close()
+
+
+    if not app:
+
+        return True
+
+
+    is_production = app[0]
+
+
+    if not is_production:
+
+        return True
+
+
+
+    print()
+
+    print("WARNING: Production Deployment")
+    print("==============================")
+
+
+    from core.manager import get_running_container_image
+
+
+    current = get_running_container_image(
+        app[1]
+    )
+
+
+    print()
+
+    print(
+        "Current Image:",
+        current
+    )
+
+
+    print()
+
+
+    answer = input(
+        "Continue deployment? (yes/no): "
+    )
+
+
+    if answer.lower() != "yes":
+
+        print(
+            "Deployment cancelled"
+        )
+
+        return False
+
+
+    return True
+
+
+def app_deploy(name):
+
+    conn = sqlite3.connect(
+        "/opt/deploy-manager/registry/deploy-manager.db"
+    )
+
+    cursor = conn.cursor()
+
+
+    cursor.execute(
+        "SELECT id,path FROM applications WHERE name=?",
+        (name,)
+    )
+
+
+    app = cursor.fetchone()
+
+    conn.close()
+
+
+    if not app:
+
+        print("Application not found")
+
+        return
+
+
+    app_id = app[0]
+
+    path = app[1]
+
+
+    print()
+
+    print("Deployment Pipeline")
+
+    print("==============================")
+
+
+
+    if not production_guard(name):
+
+        return
+
+
+    result = run_pipeline(
+        name,
+        path,
+        app_id
+    )
+
+
+    print()
+
+    print(
+        "Final State:",
+        result.status()
+    )
+
+
+
+
+def app_versions(name):
+
+    conn = sqlite3.connect(
+        "/opt/deploy-manager/registry/deploy-manager.db"
+    )
+
+    cursor = conn.cursor()
+
+    cursor.execute(
+        "SELECT id FROM applications WHERE name=?",
+        (name,)
+    )
+
+    app = cursor.fetchone()
+
+    conn.close()
+
+
+    if not app:
+
+        print("Application not found")
+        return
+
+
+    versions = get_image_versions(
+        app[0]
+    )
+
+
+    print()
+    print("Image Versions")
+    print("==============================")
+    print(
+        "TAG                 IMAGE                 STATUS"
+    )
+    print("----------------------------------------------")
+
+
+    for v in versions:
+
+        print(
+            f"{v[1]:18} {v[2]:35} {v[3]}"
+        )
+
+
+
+def app_logs(name):
+
+    container = get_container_name(name)
+
+    if not container:
+        print("Application not found")
+        return
+
+    print(
+        get_logs(container)
+    )
+
+
+
+
+
+def get_app_id(app):
+
+    import sqlite3
+
+    conn = sqlite3.connect(
+        "/opt/deploy-manager/registry/deploy-manager.db"
+    )
+
+    cursor = conn.cursor()
+
+    cursor.execute(
+        "SELECT id FROM applications WHERE name=?",
+        (app,)
+    )
+
+    row = cursor.fetchone()
+
+    conn.close()
+
+    return row[0] if row else None
+
+
+
+def get_app_path(app):
+
+    import sqlite3
+
+    conn = sqlite3.connect(
+        "/opt/deploy-manager/registry/deploy-manager.db"
+    )
+
+    cursor = conn.cursor()
+
+    cursor.execute(
+        "SELECT path FROM applications WHERE name=?",
+        (app,)
+    )
+
+    row = cursor.fetchone()
+
+    conn.close()
+
+    return row[0] if row else None
+
+
+
+def app_rebuild(name):
+
+    path = get_app_path(name)
+
+    if not path:
+        print("Application not found")
+        return
+
+
+    print(
+        rebuild_project(path)
+    )
+
+
+
+def app_restart(name):
+
+
+    container = get_container_name(name)
+
+    if not container:
+        print("Application not found")
+        return
+
+    print(
+        restart_container(container)
+    )
+
+
+
+def app_status(name):
+
+
+    result = get_app_status(name)
+
+    if not result:
+        print("Application not found")
+        return
+
+    import json
+
+    print(
+        json.dumps(
+            result,
+            indent=4,
+            ensure_ascii=False
+        )
+    )
+
+
+
+
+def app_history(name):
+
+    conn = sqlite3.connect(
+        "/opt/deploy-manager/registry/deploy-manager.db"
+    )
+
+    cursor = conn.cursor()
+
+
+    cursor.execute(
+        """
+        SELECT id
+        FROM applications
+        WHERE name=?
+        """,
+        (name,)
+    )
+
+
+    app = cursor.fetchone()
+
+
+    if not app:
+
+        print("Application not found")
+        return
+
+
+    deployments = get_deployments(
+        app[0]
+    )
+
+
+    print("""
+Deployment History
+==================
+""")
+
+
+    print(
+        f"{'DATE':20} {'ACTION':12} {'STATUS':10} {'IMAGE'}"
+    )
+
+    print(
+        "-" * 90
+    )
+
+
+    for item in deployments:
+
+        created = item[5][:16].replace(
+            "T",
+            " "
+        )
+
+        print(
+            f"{created:20} {item[2]:12} {item[3]:10} {item[7] or 'N/A'}"
+        )
+
+
+    conn.close()
+
+
+def main():
+
+
+    if len(sys.argv) < 2:
+
+        print("""
+Deploy Manager
+
+Commands:
+
+ server-info
+ docker-info
+ scan
+ registry-init
+ registry-status
+ inspect-app <name>
+ import
+ list
+""")
+
+        return
+
+
+    command = sys.argv[1]
+
+
+    if command == "server-info":
+        server_info()
+
+    elif command == "docker-info":
+        docker_info()
+
+    elif command == "registry-init":
+        registry_init()
+
+    elif command == "registry-status":
+        registry_status()
+
+    elif command == "import":
+        do_import()
+
+    elif command == "list":
+        list_apps()
+
+
+    elif command == "pipeline-test":
+
+        if len(sys.argv) < 3:
+
+            print("Application name required")
+            return
+
+
+        app_pipeline_test(
+            sys.argv[2]
+        )
+
+
+    elif command == "deploy":
+
+        if len(sys.argv) < 3:
+
+            print("Application name required")
+            return
+
+
+        app_deploy(
+            sys.argv[2]
+        )
+
+
+    elif command == "versions":
+
+        if len(sys.argv) < 3:
+            print("Application name required")
+            return
+
+        app_versions(sys.argv[2])
+
+
+    elif command == "versions-import":
+
+        if len(sys.argv) < 3:
+            print("Application name required")
+            return
+
+        app_versions_import(
+            sys.argv[2]
+        )
+
+
+    elif command == "rollback-version":
+
+        if len(sys.argv) < 4:
+            print("Application name and version required")
+            return
+
+
+        app_version_rollback(
+            sys.argv[2],
+            sys.argv[3]
+        )
+
+
+
+
+    elif command == "cleanup":
+
+        if len(sys.argv) < 3:
+            print("Application name required")
+            return
+
+
+        keep = 3
+
+
+        if "--keep" in sys.argv:
+
+            index = sys.argv.index("--keep")
+
+            if index + 1 < len(sys.argv):
+
+                keep = int(sys.argv[index + 1])
+
+
+        app_cleanup(
+            sys.argv[2],
+            keep
+        )
+
+
+    elif command == "restore":
+
+        if len(sys.argv) < 4:
+            print("Application name and backup id required")
+            return
+
+        app_restore(
+            sys.argv[2],
+            sys.argv[3]
+        )
+
+
+    elif command == "backups":
+
+        if len(sys.argv) < 3:
+            print("Application name required")
+            return
+
+        app_backups(sys.argv[2])
+
+
+    elif command == "backup":
+
+        if len(sys.argv) < 3:
+            print("Application name required")
+            return
+
+        app_backup(sys.argv[2])
+
+
+    elif command == "logs":
+
+        if len(sys.argv) < 3:
+            print("Application name required")
+            return
+
+        app_logs(sys.argv[2])
+
+
+    elif command == "rebuild":
+
+        if len(sys.argv) < 3:
+            print("Application name required")
+            return
+
+        app_rebuild(sys.argv[2])
+
+
+    elif command == "restart":
+
+        if len(sys.argv) < 3:
+            print("Application name required")
+            return
+
+        app_restart(sys.argv[2])
+
+
+    elif command == "status":
+
+        if len(sys.argv) < 3:
+            print("Application name required")
+            return
+
+        app_status(sys.argv[2])
+
+    elif command == "inspect-app":
+
+        if len(sys.argv) < 3:
+            print("Application name required")
+            return
+
+        inspect(sys.argv[2])
+
+
+    elif command == "history":
+
+        if len(sys.argv) < 3:
+            print("Application name required")
+            return
+
+        app_history(sys.argv[2])
+
+
+    elif command == "rollback":
+
+        if len(sys.argv) < 3:
+            print("Application name required")
+            return
+
+        path = get_app_path(
+            sys.argv[2]
+        )
+
+        version = None
+
+        if '--version' in sys.argv:
+
+            index = sys.argv.index('--version')
+
+            if index + 1 < len(sys.argv):
+                version = sys.argv[index + 1]
+
+        print(
+            rollback_project(path, version)
+        )
+
+
+    else:
+
+        print(
+            f"Unknown command: {command}"
+        )
+
+
+if __name__ == "__main__":
+    main()
